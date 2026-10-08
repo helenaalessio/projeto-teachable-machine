@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Angelhops₊˚⊹♡</title>
+    <style>
+        /* ===== APARÊNCIA: mude cores, tamanhos e fontes aqui ===== */
+        body { 
+            text-align: center; 
+            font-family: Arial, sans-serif; 
+            background-color: #faf0f5; /* Um fundo suave opcional */
+            color: #333;
+        }
+        #mensagem { 
+            font-size: 40px; 
+            font-weight: bold;
+            color: #d1477a;
+            margin: 20px 0;
+        }
+        #webcam-container canvas {
+            border: 4px solid #d1477a;
+            border-radius: 10px;
+        }
+        #botao {
+            padding: 10px 25px;
+            font-size: 18px;
+            background-color: #d1477a;
+            color: white;
+            border: none;
+            border-radius: 20px;
+            cursor: pointer;
+        }
+        #botao:hover {
+            background-color: #b0357d;
+        }
+    </style>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <!-- ===== TELA DO JOGO: título, mensagens e botão ===== -->
+    <h1>Angelhops</h1>
+    <button id="botao" onclick="comecar()">Começar</button>
+    <br>
+    <p>₊˚⊹♡Ajude Angel a se desviar dos obstáculos da floresta..𖹭.ᐟ</p>
+    <p>₊˚⊹Certifique-se de permitir o acesso à webcam quando solicitado.</p>
+    
+    <!-- Local onde a IA mostrará a classe detectada com maior certeza -->
+    <div id="mensagem">Indefinido</div>
+
+    <!-- Contêineres onde a câmera e as listas de porcentagem do Google vão aparecer -->
+    <div id="webcam-container"></div>
+    <div id="label-container" style="display: none;"></div> <!-- Escondido por padrão, remova o style se quiser ver as barras de % -->
+
+    <!-- Importação correta do TensorFlow e do Teachable Machine para IMAGENS -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
+
+    <script type="text/javascript">
+        // Link do seu modelo de Imagem exportado do Teachable Machine
+        const URL = "https://teachablemachine.withgoogle.com/models/KuEM5cDaM/";
+
+        let model, webcam, labelContainer, maxPredictions;
+        let gestoAtual = "Indefinido";
+
+        // ==================================================
+        // SEU JOGO AQUI
+        // Esta função roda o tempo todo recebendo o gesto mais forte.
+        // ==================================================
+        function jogo(gesto) {
+            document.getElementById("mensagem").innerText = gesto;
+            
+            // Exemplo de como você pode usar no futuro:
+            // if (gesto === "Pular") {
+            //     fazerPersonagemPular();
+            // }
+        }
+
+        // Função disparada ao clicar no botão Começar
+        async function comecar() {
+            // Esconde o botão após o clique
+            document.getElementById("botao").style.display = "none";
+            
+            const modelURL = URL + "model.json";
+            const metadataURL = URL + "metadata.json";
+
+            // Carrega o modelo de imagem
+            model = await tmImage.load(modelURL, metadataURL);
+            maxPredictions = model.getTotalClasses();
+            console.log("IA de imagem carregada com sucesso!");
+
+            // Configuração da Webcam (Largura, Altura, Espelhar câmera)
+            const largura = 300;
+            const altura = 300;
+            const flip = true; 
+            
+            webcam = new tmImage.Webcam(largura, altura, flip); 
+            await webcam.setup(); // Pede permissão para a webcam
+            await webcam.play();
+            
+            // Desenha a câmera na tela dentro do contêiner correto
+            document.getElementById("webcam-container").appendChild(webcam.canvas);
+            
+            // Prepara a lista de porcentagens interna
+            labelContainer = document.getElementById("label-container");
+            for (let i = 0; i < maxPredictions; i++) { 
+                labelContainer.appendChild(document.createElement("div"));
+            }
+
+            // Inicia o loop de atualização contínua
+            window.requestAnimationFrame(loop);
+        }
+
+        async function loop() {
+            webcam.update(); // Atualiza o frame da câmera
+            await predict(); // Faz a IA prever o que está vendo
+            window.requestAnimationFrame(loop);
+        }
+
+        async function predict() {
+            // Roda a imagem atual no modelo
+            const prediction = await model.predict(webcam.canvas);
+            
+            let melhorGesto = "Indefinido";
+            let maiorCerteza = 0;
+
+            for (let i = 0; i < maxPredictions; i++) {
+                // Atualiza a lista interna de porcentagens (caso queira exibir)
+                const classPrediction = prediction[i].className + ": " + prediction[i].probability.toFixed(2);
+                labelContainer.childNodes[i].innerHTML = classPrediction;
+
+                // Lógica para descobrir qual classe tem a maior certeza na tela
+                if (prediction[i].probability > maiorCerteza) {
+                    maiorCerteza = prediction[i].probability;
+                    melhorGesto = prediction[i].className;
+                }
+            }
+
+            // Define um limite mínimo de 80% de certeza para validar o gesto
+            if (maiorCerteza > 0.80) {
+                gestoAtual = melhorGesto;
+            } else {
+                gestoAtual = "Indefinido";
+            }
+
+            // Envia o gesto detectado para a função do seu jogo
+            jogo(gestoAtual);
+        }
+    </script>
+</body>
+
+</html>
