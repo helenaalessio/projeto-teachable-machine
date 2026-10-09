@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Angelhops</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <main class="app-shell">
+        <section id="intro" class="intro" aria-labelledby="titulo">
+            <h1 id="titulo">Angelhops</h1>
+            <p>Ajude Angel a atravessar a floresta e chegar até Fluttershy (˶˃ ᵕ ˂˶) .ᐟ.ᐟ</p>
+            <p>Faça o gesto de pulo para passar pelo tronco e abaixe-se para desviar do arco-íris.</p>
+            <button id="botao" type="button" onclick="comecar()">Começar</button>
+        </section>
+
+        <section id="jogo" class="game-stage" aria-label="Jogo Angelhops" hidden>
+            <div class="game-heading">
+                <p id="mensagem" role="status" aria-live="polite">Carregando o jogo...</p>
+                <p id="pontuacao">Pontos: 0/10</p>
+            </div>
+            <div class="canvas-wrap">
+                <canvas id="game-canvas" width="960" height="540" aria-label="Coelho desviando de obstáculos na floresta"></canvas>
+                <div id="webcam-container" class="webcam-preview" aria-label="Prévia da webcam"></div>
+                <div id="tela-vitoria" class="win-screen" aria-hidden="true">
+                    <img class="win-image" src="youwon.gif" alt="Fluttershy abraçando o coelho">
+                    <p>Você conseguiu!</p>
+                    <button id="reiniciar-vitoria" class="win-restart" type="button">Jogar novamente</button>
+                </div>
+            </div>
+            <p id="controles-teclado" class="keyboard-controls" hidden>Controles: Espaço ou seta para cima pula; seta para baixo agacha. Solte a tecla para voltar ao normal.</p>
+            <p id="erro" class="error-message" role="alert" hidden></p>
+            <button id="reiniciar" class="restart-button" type="button" hidden>Jogar novamente</button>
+        </section>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@latest/dist/teachablemachine-image.min.js"></script>
+
+    <script type="text/javascript">
+        const URL = "https://teachablemachine.withgoogle.com/models/WJj29Xu7B/";
+        const larguraCanvas = 960;
+        const alturaCanvas = 540;
+        const chao = 445;
+        const canvas = document.getElementById("game-canvas");
+        const contexto = canvas.getContext("2d");
+        const intro = document.getElementById("intro");
+        const palco = document.getElementById("jogo");
+        const mensagem = document.getElementById("mensagem");
+        const pontuacaoTexto = document.getElementById("pontuacao");
+        const erro = document.getElementById("erro");
+        const botaoReiniciar = document.getElementById("reiniciar");
+        const molduraCanvas = document.querySelector(".canvas-wrap");
+        const telaVitoria = document.getElementById("tela-vitoria");
+        const botaoReiniciarVitoria = document.getElementById("reiniciar-vitoria");
+
+        const imagens = {
+            floresta: carregarImagem("floresta.png"),
+            neutro: carregarImagem("neutro.jpg", true),
+            pulando: carregarImagem("pulando.jpg", true),
+            flutter: carregarImagem("flutter.jpg", true),
+            tronco: carregarImagem("tronco.png", false, true),
+            rainbow: carregarImagem("rainbow.gif")
+        };
+
+        let modelo;
+        let webcam;
+        let iniciando = false;
+        let modoTeclado = false;
+        let jogoEmAndamento = false;
+        let vitoria = false;
+        let finalPendente = false;
+        let faseVitoria = "jogo";
+        let tempoFaseVitoria = 0;
+        const duracaoEntradaFlutter = 0.9;
+        let tempoAnterior = 0;
+        let tempoAnimacao = 0;
+        let tempoProximoObstaculo = 0.8;
+        let pontos = 0;
+        let gestoAtual = "neutro";
+        let ultimoGesto = "neutro";
+        let obstaculos = [];
+        let obstaculosCriados = 0;
+        let jogador = { x: 158, salto: 0, velocidadeVertical: 0 };
+
+        function carregarImagem(caminho, removerFundoBranco = false, calcularLimites = false) {
+            const imagem = new Image();
+            if (removerFundoBranco || calcularLimites) {
+                imagem.addEventListener("load", () => {
+                        if (removerFundoBranco) {
+                            imagem.processada = criarImagemSemFundo(imagem);
+                            imagem.processada.limitesOpacos = medirLimitesOpacos(imagem.processada, false);
+                        }
+                    if (calcularLimites) imagem.limitesOpacos = medirLimitesOpacos(imagem);
+                }, { once: true });
+            }
+            imagem.src = caminho;
+            return imagem;
+        }
+
+        function criarImagemSemFundo(imagem) {
+            const canvasTemporario = document.createElement("canvas");
+            canvasTemporario.width = imagem.naturalWidth;
+            canvasTemporario.height = imagem.naturalHeight;
+            const contextoTemporario = canvasTemporario.getContext("2d", { willReadFrequently: true });
+            contextoTemporario.drawImage(imagem, 0, 0);
+
+            const pixels = contextoTemporario.getImageData(0, 0, canvasTemporario.width, canvasTemporario.height);
+            const largura = pixels.width;
+            const altura = pixels.height;
+            const visitados = new Uint8Array(largura * altura);
+            const fila = new Uint32Array(largura * altura);
+            let inicio = 0;
+            let fim = 0;
+
+            function adicionarSeBranco(indice) {
+                if (visitados[indice]) return;
+                const pixel = indice * 4;
+                const vermelho = pixels.data[pixel];
+                const verde = pixels.data[pixel + 1];
+                const azul = pixels.data[pixel + 2];
+                if (vermelho < 238 || verde < 238 || azul < 238 || Math.max(vermelho, verde, azul) - Math.min(vermelho, verde, azul) > 18) return;
+                visitados[indice] = 1;
+                fila[fim++] = indice;
+            }
+
+            for (let x = 0; x < largura; x += 1) {
+                adicionarSeBranco(x);
+                adicionarSeBranco((altura - 1) * largura + x);
+            }
+            for (let y = 0; y < altura; y += 1) {
+                adicionarSeBranco(y * largura);
+                adicionarSeBranco(y * largura + largura - 1);
+            }
+
+            while (inicio < fim) {
+                const indice = fila[inicio++];
+                pixels.data[indice * 4 + 3] = 0;
+                const x = indice % largura;
+                const y = Math.floor(indice / largura);
+                if (x > 0) adicionarSeBranco(indice - 1);
+                if (x < largura - 1) adicionarSeBranco(indice + 1);
+                if (y > 0) adicionarSeBranco(indice - largura);
+                if (y < altura - 1) adicionarSeBranco(indice + largura);
+                if (x > 0 && y > 0) adicionarSeBranco(indice - largura - 1);
+                if (x < largura - 1 && y > 0) adicionarSeBranco(indice - largura + 1);
+                if (x > 0 && y < altura - 1) adicionarSeBranco(indice + largura - 1);
+                if (x < largura - 1 && y < altura - 1) adicionarSeBranco(indice + largura + 1);
+            }
+
+            contextoTemporario.putImageData(pixels, 0, 0);
+            return canvasTemporario;
+        }
+
+        function medirLimitesOpacos(imagem, incluirMascara = true) {
+            const canvasTemporario = document.createElement("canvas");
+            const larguraImagem = imagem.naturalWidth || imagem.width;
+            const alturaImagem = imagem.naturalHeight || imagem.height;
+            canvasTemporario.width = larguraImagem;
+            canvasTemporario.height = alturaImagem;
+            const contextoTemporario = canvasTemporario.getContext("2d", { willReadFrequently: true });
+            contextoTemporario.drawImage(imagem, 0, 0);
+            const pixels = contextoTemporario.getImageData(0, 0, canvasTemporario.width, canvasTemporario.height);
+            let esquerda = pixels.width;
+            let direita = 0;
+            let topo = pixels.height;
+            let base = 0;
+            const mascara = incluirMascara ? new Uint8Array(pixels.width * pixels.height) : null;
+
+            for (let y = 0; y < pixels.height; y += 1) {
+                for (let x = 0; x < pixels.width; x += 1) {
+                    const indice = y * pixels.width + x;
+                    if (pixels.data[indice * 4 + 3] > 16) {
+                        if (mascara) mascara[indice] = 1;
+                        esquerda = Math.min(esquerda, x);
+                        direita = Math.max(direita, x);
+                        topo = Math.min(topo, y);
+                        base = Math.max(base, y);
+                    }
+                }
+            }
+
+            return direita >= esquerda && base >= topo
+                ? { esquerda, direita: direita + 1, topo, base: base + 1, mascara }
+                : null;
+        }
+
+        function comecar() {
+            if (iniciando || modelo) return;
+            iniciando = true;
+            document.getElementById("botao").disabled = true;
+            intro.classList.add("sumindo");
+
+            window.setTimeout(() => {
+                intro.hidden = true;
+                palco.hidden = false;
+                window.requestAnimationFrame(() => palco.classList.add("visivel"));
+            }, 450);
+
+            window.requestAnimationFrame(loopJogo);
+            iniciarModelo();
+        }
+
+        async function iniciarModelo() {
+            try {
+                modelo = await tmImage.load(URL + "model.json", URL + "metadata.json");
+                webcam = new tmImage.Webcam(200, 200, true);
+                await webcam.setup();
+                await webcam.play();
+                document.getElementById("webcam-container").replaceChildren(webcam.canvas);
+
+                mensagem.textContent = "Faça um gesto para começar";
+                jogoEmAndamento = true;
+                tempoAnterior = 0;
+                window.requestAnimationFrame(loopWebcam);
+            } catch (falha) {
+                console.info("Webcam indisponível; modo teclado ativado.", falha);
+                ativarModoTeclado();
+            } finally {
+                iniciando = false;
+            }
+        }
+
+        function ativarModoTeclado() {
+            modoTeclado = true;
+            modelo = null;
+            jogoEmAndamento = true;
+            tempoAnterior = 0;
+            if (webcam && webcam.webcam && webcam.webcam.srcObject && webcam.stop) webcam.stop();
+            webcam = null;
+            document.getElementById("webcam-container").hidden = true;
+            document.getElementById("controles-teclado").hidden = false;
+            mensagem.textContent = "Modo teclado ativado";
+            erro.textContent = "A câmera não está disponível. Continue jogando pelo teclado.";
+            erro.hidden = false;
+            botaoReiniciar.hidden = true;
+        }
+
+        async function loopWebcam() {
+            if (!webcam || !modelo || vitoria) return;
+            try {
+                webcam.update();
+                const previsoes = await modelo.predict(webcam.canvas);
+                const melhor = previsoes.reduce((anterior, atual) =>
+                    atual.probability > anterior.probability ? atual : anterior
+                );
+                jogo(melhor.probability >= 0.8 ? melhor.className : "indefinido");
+            } catch (falha) {
+                console.error(falha);
+                ativarModoTeclado();
+                return;
+            }
+            window.requestAnimationFrame(loopWebcam);
+        }
+
+        function jogo(gesto) {
+            if (vitoria) return;
+            const nome = gesto.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+            const novoGesto = nome.includes("pulando") ? "pulando" : nome.includes("baixo") ? "baixo" : nome.includes("neutro") ? "neutro" : "indefinido";
+
+            if (novoGesto !== ultimoGesto && (novoGesto === "pulando" || novoGesto === "baixo")) {
+                if (novoGesto === "pulando" && jogador.salto === 0) {
+                    jogador.velocidadeVertical = 760;
+                }
+            }
+
+            ultimoGesto = novoGesto;
+            gestoAtual = novoGesto;
+
+            if (novoGesto === "pulando") mensagem.textContent = "Pulo!";
+            else if (novoGesto === "baixo") mensagem.textContent = "Abaixada!";
+            else if (novoGesto === "neutro") mensagem.textContent = "Prepare-se...";
+            else mensagem.textContent = "Gesto não identificado";
+        }
+
+        function tratarTecla(evento, pressionada) {
+            if (!modoTeclado || !jogoEmAndamento) return;
+
+            const teclaDePulo = evento.code === "Space" || evento.code === "ArrowUp";
+            const teclaDeAgachar = evento.code === "ArrowDown";
+            if (!teclaDePulo && !teclaDeAgachar) return;
+
+            evento.preventDefault();
+            if (pressionada) {
+                jogo(teclaDeAgachar ? "baixo" : "pulando");
+                return;
+            }
+
+            if ((teclaDePulo && gestoAtual === "pulando") || (teclaDeAgachar && gestoAtual === "baixo")) {
+                jogo("neutro");
+            }
+        }
+
+        window.addEventListener("keydown", evento => tratarTecla(evento, true));
+        window.addEventListener("keyup", evento => tratarTecla(evento, false));
+
+        function loopJogo(agora) {
+            const delta = tempoAnterior ? Math.min((agora - tempoAnterior) / 1000, 0.05) : 0;
+            tempoAnterior = agora;
+            tempoAnimacao += delta;
+
+            if (jogoEmAndamento) atualizarJogo(delta);
+            else if (faseVitoria !== "jogo") atualizarSequenciaVitoria(delta);
+            desenharJogo();
+            window.requestAnimationFrame(loopJogo);
+        }
+
+        function atualizarJogo(delta) {
+            if (jogador.salto > 0 || jogador.velocidadeVertical > 0) {
+                jogador.salto += jogador.velocidadeVertical * delta;
+                jogador.velocidadeVertical -= 1900 * delta;
+                if (jogador.salto <= 0) {
+                    jogador.salto = 0;
+                    jogador.velocidadeVertical = 0;
+                }
+            }
+
+            const velocidade = 340 + Math.min(pontos * 3, 180);
+            obstaculos.forEach(obstaculo => {
+                obstaculo.x -= velocidade * delta;
+                if (!obstaculo.contado && obstaculo.x + obstaculo.largura < 165) {
+                    obstaculo.contado = true;
+                    if (pontos < 10) {
+                        pontos += 1;
+                        pontuacaoTexto.textContent = `Pontos: ${pontos}/10`;
+                    }
+                }
+            });
+
+            if (pontos >= 10) {
+                pontos = 10;
+                if (!finalPendente) {
+                    finalPendente = true;
+                    tempoProximoObstaculo = Infinity;
+                    mensagem.textContent = "10 pontos! Finalizando a cena...";
+                }
+            }
+
+            obstaculos = obstaculos.filter(obstaculo => obstaculo.x + obstaculo.largura > 0);
+
+            if (obstaculos.some(colidiuComJogador)) {
+                jogoEmAndamento = false;
+                mensagem.textContent = `Fim de jogo! Pontuação: ${pontos}/10`;
+                botaoReiniciar.textContent = "Jogar novamente";
+                botaoReiniciar.hidden = false;
+                return;
+            }
+
+            if (finalPendente) {
+                if (obstaculos.length === 0) iniciarSequenciaVitoria();
+                return;
+            }
+
+            tempoProximoObstaculo -= delta;
+            if (tempoProximoObstaculo <= 0) criarObstaculo();
+        }
+
+        function criarObstaculo() {
+            const tipo = obstaculosCriados % 3 === 2 ? "rainbow" : "tronco";
+            const medidas = tipo === "tronco"
+                ? { largura: 110, altura: 110, y: chao - 87 }
+                : { largura: 190, altura: 90, y: chao - 130 };
+            obstaculos.push({ tipo, x: larguraCanvas + 20, ...medidas, contado: false });
+            obstaculosCriados += 1;
+            tempoProximoObstaculo = 1.35 + Math.random() * 0.65;
+        }
+
+        function colidiuComJogador(obstaculo) {
+            if (faseVitoria !== "jogo") return false;
+
+            const agachado = gestoAtual === "baixo" && jogador.salto === 0;
+            const alturaJogador = agachado ? 54 : 112;
+            const topoJogador = chao - alturaJogador - jogador.salto;
+            const caixaJogador = { esquerda: jogador.x + 17, direita: jogador.x + 77, topo: topoJogador + 13, base: chao - jogador.salto + 1 };
+            let caixaObstaculo;
+
+            if (obstaculo.tipo === "tronco") {
+                const imagem = imagens.tronco;
+                const escala = Math.min(obstaculo.largura / imagem.naturalWidth, obstaculo.altura / imagem.naturalHeight);
+                const larguraDesenho = imagem.naturalWidth * escala;
+                const alturaDesenho = imagem.naturalHeight * escala;
+                const origemX = obstaculo.x + (obstaculo.largura - larguraDesenho) / 2;
+                const origemY = obstaculo.y + (obstaculo.altura - alturaDesenho) / 2;
+                const limites = imagem.limitesOpacos || {
+                    esquerda: imagem.naturalWidth * 0.14,
+                    direita: imagem.naturalWidth * 0.86,
+                    topo: imagem.naturalHeight * 0.17,
+                    base: imagem.naturalHeight * 0.83
+                };
+                caixaObstaculo = {
+                    esquerda: origemX + limites.esquerda * escala,
+                    direita: origemX + limites.direita * escala,
+                    topo: origemY + limites.topo * escala,
+                    base: origemY + limites.base * escala
+                };
+            } else {
+                caixaObstaculo = { esquerda: obstaculo.x + 24, direita: obstaculo.x + obstaculo.largura - 20, topo: chao - 120, base: chao - 62 };
+            }
+
+            return caixaJogador.esquerda < caixaObstaculo.direita
+                && caixaJogador.direita > caixaObstaculo.esquerda
+                && caixaJogador.topo < caixaObstaculo.base
+                && caixaJogador.base > caixaObstaculo.topo
+                && (obstaculo.tipo !== "tronco" || colidiuComTroncoVisivel(obstaculo, caixaJogador));
+        }
+
+        function colidiuComTroncoVisivel(obstaculo, caixaJogador) {
+            const imagem = imagens.tronco;
+            const limites = imagem.limitesOpacos;
+            if (!limites) return true;
+
+            const escala = Math.min(obstaculo.largura / imagem.naturalWidth, obstaculo.altura / imagem.naturalHeight);
+            const origemX = obstaculo.x + (obstaculo.largura - imagem.naturalWidth * escala) / 2;
+            const origemY = obstaculo.y + (obstaculo.altura - imagem.naturalHeight * escala) / 2;
+            const esquerda = Math.max(caixaJogador.esquerda, origemX + limites.esquerda * escala);
+            const direita = Math.min(caixaJogador.direita, origemX + limites.direita * escala);
+            const topo = Math.max(caixaJogador.topo, origemY + limites.topo * escala);
+            const base = Math.min(caixaJogador.base, origemY + limites.base * escala);
+
+            for (let y = Math.floor((topo - origemY) / escala); y < Math.ceil((base - origemY) / escala); y += 4) {
+                for (let x = Math.floor((esquerda - origemX) / escala); x < Math.ceil((direita - origemX) / escala); x += 4) {
+                    if (x >= 0 && y >= 0 && x < imagem.naturalWidth && y < imagem.naturalHeight && limites.mascara[y * imagem.naturalWidth + x]) return true;
+                }
+            }
+            return false;
+        }
+
+        function desenharJogo() {
+            desenharImagemCoberta(imagens.floresta, 0, 0, larguraCanvas, alturaCanvas, "#9bcf91");
+            contexto.fillStyle = "rgba(40, 83, 49, 0.22)";
+            contexto.fillRect(0, chao, larguraCanvas, alturaCanvas - chao);
+            contexto.fillStyle = "#416b43";
+            contexto.fillRect(0, chao + 26, larguraCanvas, alturaCanvas - chao - 26);
+
+            obstaculos.forEach(obstaculo => {
+                desenharImagemContida(imagens[obstaculo.tipo], obstaculo.x, obstaculo.y, obstaculo.largura, obstaculo.altura, obstaculo.tipo === "tronco" ? "#725039" : "#f7c6e5");
+            });
+
+            if (faseVitoria !== "jogo") {
+                contexto.save();
+                let posicaoFlutter = 785;
+                if (faseVitoria === "flutter-entrando") {
+                    const progresso = Math.min(tempoFaseVitoria / duracaoEntradaFlutter, 1);
+                    const easeOut = 1 - Math.pow(1 - progresso, 3);
+                    posicaoFlutter = larguraCanvas + 35 + (785 - (larguraCanvas + 35)) * easeOut;
+                    contexto.globalAlpha = progresso;
+                }
+                const alturaFlutter = 260;
+                const larguraFlutter = 150;
+                const margemBaseFlutter = obterMargemTransparenteInferior(imagens.flutter, larguraFlutter, alturaFlutter);
+                desenharImagemContida(imagens.flutter, posicaoFlutter, chao - alturaFlutter + margemBaseFlutter + 17, larguraFlutter, alturaFlutter, "#fff");
+                contexto.restore();
+            }
+
+            desenharCoelho();
+
+            if (!modelo && !modoTeclado) {
+                contexto.fillStyle = "rgba(20, 38, 25, 0.58)";
+                contexto.fillRect(0, 0, larguraCanvas, alturaCanvas);
+                contexto.fillStyle = "#fff";
+                contexto.font = "bold 28px sans-serif";
+                contexto.textAlign = "center";
+                contexto.fillText("Preparando a webcam e o modelo...", larguraCanvas / 2, alturaCanvas / 2);
+            }
+
+            if (!jogoEmAndamento && modelo && faseVitoria === "jogo") {
+                contexto.fillStyle = "rgba(20, 38, 25, 0.38)";
+                contexto.fillRect(0, 0, larguraCanvas, alturaCanvas);
+            }
+        }
+
+        function desenharCoelho() {
+            const agachado = gestoAtual === "baixo" && jogador.salto === 0;
+            const noAr = jogador.salto > 0;
+            const paradoComFlutter = faseVitoria === "pausa" || faseVitoria === "fade" || faseVitoria === "final";
+            const alternarSprite = Math.floor(tempoAnimacao * 4) % 2 === 1;
+            const imagem = !paradoComFlutter && (noAr || agachado || alternarSprite) ? imagens.pulando : imagens.neutro;
+            const altura = agachado ? 68 : 112;
+            const largura = agachado ? 112 : 94;
+            const balanco = paradoComFlutter || noAr || agachado ? 0 : Math.abs(Math.sin(tempoAnimacao * 8)) * 9;
+            const margemBase = obterMargemTransparenteInferior(imagem, largura, altura);
+            const topo = chao - altura - jogador.salto - balanco + margemBase + 5;
+
+            desenharImagemContida(imagem, jogador.x, topo, largura, altura, "#f5f0e8");
+        }
+
+        function desenharImagemCoberta(imagem, x, y, largura, altura, corReserva) {
+            if (!imagem.complete || !imagem.naturalWidth) {
+                contexto.fillStyle = corReserva;
+                contexto.fillRect(x, y, largura, altura);
+                return;
+            }
+
+            const escala = Math.max(largura / imagem.naturalWidth, altura / imagem.naturalHeight);
+            const larguraDesenho = imagem.naturalWidth * escala;
+            const alturaDesenho = imagem.naturalHeight * escala;
+            contexto.save();
+            contexto.beginPath();
+            contexto.rect(x, y, largura, altura);
+            contexto.clip();
+            contexto.drawImage(imagem, x + (largura - larguraDesenho) / 2, y + (altura - alturaDesenho) / 2, larguraDesenho, alturaDesenho);
+            contexto.restore();
+        }
+
+        function desenharImagemContida(imagem, x, y, largura, altura, corReserva) {
+            const fonte = imagem.processada || imagem;
+            const larguraOriginal = imagem.processada ? fonte.width : imagem.naturalWidth;
+            const alturaOriginal = imagem.processada ? fonte.height : imagem.naturalHeight;
+            if (!imagem.complete || !larguraOriginal) {
+                contexto.fillStyle = corReserva;
+                contexto.fillRect(x, y, largura, altura);
+                return;
+            }
+
+            const escala = Math.min(largura / larguraOriginal, altura / alturaOriginal);
+            const larguraDesenho = larguraOriginal * escala;
+            const alturaDesenho = alturaOriginal * escala;
+            contexto.drawImage(fonte, x + (largura - larguraDesenho) / 2, y + (altura - alturaDesenho) / 2, larguraDesenho, alturaDesenho);
+        }
+
+        function obterMargemTransparenteInferior(imagem, largura, altura) {
+            const fonte = imagem.processada || imagem;
+            const limites = fonte.limitesOpacos;
+            const larguraOriginal = fonte.naturalWidth || fonte.width;
+            const alturaOriginal = fonte.naturalHeight || fonte.height;
+            if (!limites || !larguraOriginal || !alturaOriginal) return 0;
+
+            const escala = Math.min(largura / larguraOriginal, altura / alturaOriginal);
+            const alturaDesenho = alturaOriginal * escala;
+            const topoDesenho = (altura - alturaDesenho) / 2;
+            return Math.max(0, altura - topoDesenho - limites.base * escala);
+        }
+
+        function iniciarSequenciaVitoria() {
+            if (faseVitoria !== "jogo") return;
+            vitoria = true;
+            jogoEmAndamento = false;
+            palco.classList.add("cutscene");
+            faseVitoria = "flutter-entrando";
+            tempoFaseVitoria = 0;
+            jogador.x = 158;
+            jogador.salto = 0;
+            jogador.velocidadeVertical = 0;
+            gestoAtual = "neutro";
+            obstaculos = [];
+            mensagem.textContent = "Chegando à linha de chegada...";
+        }
+
+        function atualizarSequenciaVitoria(delta) {
+            if (faseVitoria === "flutter-entrando") {
+                tempoFaseVitoria += delta;
+                if (tempoFaseVitoria >= duracaoEntradaFlutter) {
+                    faseVitoria = "aproximando";
+                    tempoFaseVitoria = 0;
+                }
+                return;
+            }
+
+            if (faseVitoria === "aproximando") {
+                jogador.x = Math.min(680, jogador.x + 230 * delta);
+                if (jogador.x >= 680) {
+                    faseVitoria = "pausa";
+                    tempoFaseVitoria = 0;
+                    mensagem.textContent = "Você conseguiu!";
+                }
+                return;
+            }
+
+            tempoFaseVitoria += delta;
+            if (faseVitoria === "pausa" && tempoFaseVitoria >= 0.55) {
+                faseVitoria = "fade";
+                tempoFaseVitoria = 0;
+                molduraCanvas.classList.add("vitoria-fade");
+            } else if (faseVitoria === "fade" && tempoFaseVitoria >= 0.9) {
+                finalizarVitoria();
+            }
+        }
+
+        function finalizarVitoria() {
+            faseVitoria = "final";
+            mensagem.textContent = "Você conseguiu!";
+            telaVitoria.setAttribute("aria-hidden", "false");
+            molduraCanvas.classList.add("vitoria-final");
+        }
+
+        function reiniciarJogo() {
+            if (!modelo && !modoTeclado) {
+                erro.hidden = true;
+                botaoReiniciar.hidden = true;
+                iniciarModelo();
+                return;
+            }
+
+            vitoria = false;
+            faseVitoria = "jogo";
+            tempoFaseVitoria = 0;
+            palco.classList.remove("cutscene");
+            molduraCanvas.classList.remove("vitoria-fade", "vitoria-final");
+            telaVitoria.setAttribute("aria-hidden", "true");
+            obstaculos = [];
+            obstaculosCriados = 0;
+            tempoProximoObstaculo = 0.8;
+            pontos = 0;
+            finalPendente = false;
+            jogador = { x: 158, salto: 0, velocidadeVertical: 0 };
+            gestoAtual = "neutro";
+            ultimoGesto = "neutro";
+            pontuacaoTexto.textContent = "Pontos: 0/10";
+            mensagem.textContent = modoTeclado ? "Use as teclas para jogar" : "Faça um gesto para começar";
+            botaoReiniciar.hidden = true;
+            jogoEmAndamento = true;
+            if (webcam && modelo) window.requestAnimationFrame(loopWebcam);
+        }
+
+        botaoReiniciar.addEventListener("click", reiniciarJogo);
+        botaoReiniciarVitoria.addEventListener("click", reiniciarJogo);
+    </script>
+</body>
+
+</html>
